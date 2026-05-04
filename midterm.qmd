@@ -16,6 +16,7 @@ library(glue)
 library(here)
 library(rio)
 library(janitor)
+library(ggtext)
 ```
 ## Part A: Data
 
@@ -98,3 +99,200 @@ library(gapr)
 ```
 ### 1. (15 points)
 Estimate the average achievement differences in terms of an effect size for every school district in the state that reported data on both student groups (i.e., using the data we created above), for each academic year. Conduct this analysis twice, once using group_by() |> nest() and map() and once using nest_by() |> summarize().
+
+```{r}
+# this is my original code, which didn't work because, for some reason, estimate_v is failing on a few items
+
+#analysis1 <- ode_sum |>
+#  group_by(academic_year, district) |>
+#  nest() |>
+#  mutate(
+#    v_estimate = map(data, ~estimate_v(.x, "white", "hispanic_latino")),
+#    v = map_dbl(v_estimate, "v")
+#  )
+
+# I pasted the above code into chatGPT and asked it how I can just remove those rows where the analysis fails, since analysis2 just seems to be automatically removing them. 
+
+# The precise prompt was [pasted code] + "The above is using estimate_v to do an analysis on each district by academic year, but whenever estimate_v returns an empty data frame, v can't be determined and it throws an error..."
+
+# after it replied, I added "what if i want to just remove the empty rows"
+
+# it gave me the following:
+
+analysis1 <- ode_sum |>
+  group_by(academic_year, district) |>
+  nest() |>
+  mutate(
+    v_estimate = map(data, ~estimate_v(.x, "white", "hispanic_latino"))
+  ) |>
+  filter(map_lgl(v_estimate, ~nrow(.x) > 0 && "v" %in% names(.x))) |>
+  mutate(
+    v = map_dbl(v_estimate, ~.x$v[1])
+  )
+```
+```{r}
+# nest_by + summarize
+analysis2 <- ode_sum |>
+  ungroup() |>
+  nest_by(academic_year, district) |>
+  summarize(
+    data = list(data),
+    v_estimate = list(estimate_v(data, "white", "hispanic_latino") ),
+    # had to ask a similar question of chatgpt here as in analysis 1
+    v = {
+      if (nrow(v_estimate) == 0) NA_real_
+      else v_estimate[["v"]]
+    }
+  )  |> 
+  filter (!is.na(v))
+```
+
+### 2. (10 points)
+
+Reproduce the following plot to confirm that the estimates are equivalent across methods.
+
+```{r}
+analysis1 |>
+  mutate(v1 = v) |>
+  select(district, v1) |>
+  left_join(select(mutate(analysis2, v2 = v), district, v2)) |>
+  ggplot(aes(x = v2, y = v1)) +
+    geom_point(size = 4, color = "grey") +
+    geom_smooth(method = lm, color = "cyan", size = 1) +
+    theme_minimal() +
+    labs(
+      title = "Method Equivalence Test",
+      x = "V (nest_by) > summarize) )",
+      y = "V ('group_by() |> nest() |> mutate() |> map()')"
+    )
+```
+
+### 3. (15 points)
+
+The plot below shows the achievement difference estimates for one school district across years. Produce a similar plot to the below for each of the first 100 school districts. Once you’ve created all the plots, reproduce them again using an alternative method. Make sure you don’t miss the caption noting the number of schools in the district.
+
+```{r}
+dists <- unique(analysis2$district)[1:100]
+
+analysisprime <- analysis2 |>
+  filter(district %in% dists) |>
+  summarize(
+    v = v,
+    n_schools = data[[1]]["n_schools"][[1]][[1]],
+    v_se = v_estimate[[1]][["v_se"]][[1]]
+  )
+
+# method 1: group_by, nest, mutate, map2
+ode_plots1 <- analysisprime |>
+  ungroup() |>
+  group_by(district) |>
+  nest() |>
+  mutate(
+    plot = map2(data, district, 
+                ~.x |>
+                  ggplot(aes(x=academic_year)) +
+                    # asked gemini how to make the next line "how to make
+                    # error bars for a geom point based on an error value"
+                    theme_minimal() +
+                    geom_hline(yintercept = 0, color = "darkred") +
+                    geom_line(aes(y=v), color = "lightgrey", group = 1, size = 0.5) +
+                    geom_errorbar(aes(ymin = v - v_se, ymax = v + v_se), color = "darkgrey") +
+                    geom_point(aes(y = v, color = v>0)) +
+                    labs(
+                      title = paste0("Achievement Gap Estimates: ", .y),
+                      subtitle = "Negative values indicate <span style='color:salmon;'>White</span> students have higher average achievement\n\nPositive values indicate <span style='color:#00BFC4;'>Hispanic/Latino</span> students have higher average achievement",
+                      x = "School year",
+                      y = "Average achievement difference (SD units)",
+                      caption = paste0(
+                        "Note: District included ", 
+                        .x$n_schools[[1]], 
+                        " schools.")
+                    ) +
+                    theme(
+                      plot.subtitle = element_markdown(size=10),
+                      legend.position = "none"
+                    )
+    )
+  )
+
+ode_plots1$plot[[7]]
+
+# method 2: nest_by()
+ode_plots2 <- analysisprime |>
+  ungroup() |>
+  nest_by(district) |>
+  mutate(
+    plot = list(ggplot(data, aes(x=academic_year)) +
+                  # asked gemini how to make the next line "how to make
+                  # error bars for a geom point based on an error value"
+                  theme_minimal() +
+                  geom_hline(yintercept = 0, color = "darkred") +
+                  geom_line(aes(y=v), color = "lightgrey", group = 1, size = 0.5) +
+                  geom_errorbar(aes(ymin = v - v_se, ymax = v + v_se), color="darkgrey") +
+                  geom_point(aes(y = v, color = v>0)) +
+                  labs(
+                    title = paste0("Achievement Gap Estimates: ", district),
+                    subtitle = "Negative values indicate <span style='color:salmon;'>White</span> students have higher average achievement\n\nPositive values indicate <span style='color:#00BFC4;'>Hispanic/Latino</span> students have higher average achievement",
+                    x = "School year",
+                    y = "Average achievement difference (SD units)",
+                    caption = paste0(
+                      "Note: District included ", 
+                      data$n_schools[[1]], 
+                      " schools.")
+                  ) +
+                  theme(
+                    plot.subtitle = element_markdown(size=10),
+                    legend.position = "none"
+                  )
+    )
+  )
+
+ode_plots2$plot[[7]]
+```
+
+### 4. (10 points)
+
+Save the plots into a “plots” directory. Make sure the file names are meaningful.
+
+```{r}
+
+
+ode_plots1 |>
+  ungroup() |>
+  rowwise() |>
+  summarize(
+    ggsave(
+      here(paste0(
+        "plots/v1/", 
+        str_replace_all(
+          tolower(district), " ", "-"
+        ),
+        "-achievement-gap-v1.png")
+      ),
+      plot,
+      width = 9.5, 
+      height = 6.5,
+      dpi = 500
+    )
+  )
+
+ode_plots2 |>
+  ungroup() |>
+  rowwise() |>
+  summarize(
+    ggsave(
+      here(paste0(
+        "plots/v2/", 
+        str_replace_all(
+          tolower(district), " ", "-"
+        ),
+        "-achievement-gap-v2.png")
+      ),
+      plot,
+      width = 9.5, 
+      height = 6.5,
+      dpi = 500
+    )
+  )
+```
+
